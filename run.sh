@@ -8,6 +8,7 @@
 #   ./run.sh restart    stop + start
 #   ./run.sh fg         run in the foreground (Ctrl+C stops both)
 #   ./run.sh logs       follow the logs
+#   ./run.sh help       show all commands, variables and examples
 #
 # Tunables (env): MODEL, NGL, CTX, LLAMA_PORT, APP_PORT
 set -euo pipefail
@@ -164,6 +165,46 @@ cmd_fg() {
   tail -n 0 -f "$LOGS/llama.log" "$LOGS/app.log"
 }
 
+cmd_help() {
+  cat <<EOF
+Humanizer launcher — starts llama.cpp with the humanizer model, then the web server.
+
+Usage: ./run.sh [command]
+
+Commands:
+  start       start everything in the background (default)
+  stop        stop the web server and llama-server
+  restart     stop, then start
+  status      show process and health status
+  fg          run in the foreground; Ctrl+C stops both
+  logs        follow logs/llama.log and logs/app.log
+  help        show this message
+
+Environment variables:
+  MODEL       path to the GGUF file
+              (default: the cached humanizer-12b-IQ2_XS-QAT.gguf)
+  NGL         GPU layers to offload      (default: 38, benchmarked; 0 = CPU only)
+  CTX         context size               (default: 8192, required by the model card)
+  LLAMA_PORT  llama.cpp port             (default: 8080)
+  APP_PORT    web server port            (default: 8090)
+
+Files:
+  logs/llama.log   llama.cpp output
+  logs/app.log     web server output
+  logs/*.pid       process ids for stop/status
+  bin/humanize     compiled web server (rebuilt by "start" when Go is present)
+
+Examples:
+  ./run.sh                      start with defaults
+  NGL=30 ./run.sh               start with fewer GPU layers
+  APP_PORT=9000 ./run.sh        use a different web port
+  ./run.sh fg                   foreground run, Ctrl+C stops both
+  ./scripts/selftest.sh         verify the whole pipeline once running
+
+UI: http://127.0.0.1:$APP_PORT
+EOF
+}
+
 case "${1:-start}" in
   start|"") cmd_start ;;
   stop)     cmd_stop ;;
@@ -171,5 +212,6 @@ case "${1:-start}" in
   status)   cmd_status ;;
   fg|foreground) cmd_fg ;;
   logs)     tail -n 50 -f "$LOGS/llama.log" "$LOGS/app.log" ;;
-  *) say "usage: ./run.sh [start|stop|restart|status|fg|logs]"; exit 2 ;;
+  help|-h|--help|usage) cmd_help ;;
+  *) say "unknown command: $1"; say ""; cmd_help; exit 2 ;;
 esac

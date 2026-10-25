@@ -377,14 +377,66 @@ $("newBtn").addEventListener("click", () => {
 });
 
 copyBtn.addEventListener("click", async () => {
-  try {
-    await navigator.clipboard.writeText(lastResult);
-    copyBtn.textContent = "Copied";
-    setTimeout(() => (copyBtn.textContent = "Copy"), 1400);
-  } catch (e) {
-    showNotice("Clipboard unavailable — select the text and copy manually.", "info");
+  if (!lastResult) return;
+  const how = await copyText(lastResult);
+  if (how !== "failed") {
+    flashButton(copyBtn, "Copied");
+  } else {
+    // Last resort: select the text so Ctrl/Cmd+C always works.
+    selectElement(resultEl);
+    showNotice("Your browser blocked clipboard access, so the rewrite is now selected instead — press Ctrl/Cmd + C.", "info");
+    flashButton(copyBtn, "Selected");
   }
 });
+
+// navigator.clipboard only exists in a secure context (https or localhost);
+// over plain http on a LAN address it is undefined. Fall back to the legacy
+// path, then to selecting the text.
+async function copyText(text) {
+  if (navigator.clipboard && window.isSecureContext) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return "clipboard";
+    } catch (e) { /* permission denied or document blurred — fall through */ }
+  }
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.setAttribute("readonly", "");
+  ta.style.cssText = "position:fixed;top:0;left:0;width:1px;height:1px;padding:0;border:0;outline:0;background:transparent;opacity:0;";
+  document.body.appendChild(ta);
+  ta.focus();
+  ta.select();
+  try { ta.setSelectionRange(0, text.length); } catch (e) {}
+  let ok = false;
+  try { ok = document.execCommand("copy"); } catch (e) { ok = false; }
+  ta.remove();
+  return ok ? "legacy" : "failed";
+}
+
+function selectElement(el) {
+  try {
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+  } catch (e) { /* ignore */ }
+}
+
+// Temporary label swap that never fights with a longer-running flash.
+const flashes = new Map();
+function flashButton(btn, label) {
+  if (flashes.has(btn)) clearTimeout(flashes.get(btn));
+  const original = btn.dataset.label || btn.textContent;
+  btn.dataset.label = original;
+  btn.textContent = label;
+  btn.classList.add("is-success");
+  flashes.set(btn, setTimeout(() => {
+    btn.textContent = btn.dataset.label;
+    btn.classList.remove("is-success");
+    flashes.delete(btn);
+  }, 1600));
+}
 
 /* ---------- start ---------- */
 
