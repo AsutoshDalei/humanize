@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Humanizer</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<aside class="sidebar">
+  <div class="brand"><span class="brand-dot"></span>Humanizer</div>
+
+  <button id="newBtn" class="new-btn" type="button">＋ New</button>
+
+  <div class="side-label">Conversations</div>
+  <nav id="history" class="history"></nav>
+
+  <footer class="side-foot">
+    <span id="status" class="status checking">connecting…</span>
+    <span class="local">local · llama.cpp</span>
+  </footer>
+</aside>
+
+<main class="main">
+
+  <section class="panel">
+    <header class="panel-head">
+      <h2>Draft</h2>
+      <span id="draftStats" class="stats"></span>
+    </header>
+
+    <textarea id="draft" spellcheck="false"
+      placeholder="Paste the AI-written text you want to sound human…"></textarea>
+
+    <div class="panel-foot">
+      <span id="hint" class="hint">⌘/Ctrl + Enter</span>
+      <button id="humanizeBtn" class="primary" type="button">Humanize</button>
+    </div>
+  </section>
+
+  <section class="panel">
+    <header class="panel-head">
+      <h2>Rewritten</h2>
+      <button id="copyBtn" class="ghost" type="button" hidden>Copy</button>
+    </header>
+
+    <div id="notice" class="notice" hidden></div>
+
+    <div id="result" class="result"><p class="placeholder">The rewrite streams in here as the model writes it.</p></div>
+
+    <div class="panel-foot">
+      <span id="timing" class="stats"></span>
+    </div>
+  </section>
+
+</main>
+
+<script src="app.js"></script>
+</body>
+</html>
