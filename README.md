@@ -217,55 +217,6 @@ Messages may also carry `contamination` (string) and `overrun` (bool) when a res
 
 404 if the id is unknown.
 
-## The page
-
-**Layout.** A shared 56 px header and a shared 64 px footer span both columns, so the draft and the rewrite always start and end at exactly the same height — the two columns cannot drift apart. The middle is a two-column grid split at the centre hairline.
-
-```
-┌──────────┬──────────────────────────────────────────────────────────┐
-│ brand    │  HEADER   conversation title …………… live run status · 2px progress │
-│          ├───────────────────────────┬──────────────────────────────┤
-│ + New    │  DRAFT            142 words│  REWRITTEN          1 pass  │
-│          │                           │ │ margin rule                 │
-│ CONVOS   │  serif, editable, 66ch     │ │ serif, read-only, 66ch      │
-│  · item  │                           │ │ (margin note when needed)   │
-│  · item  │                           │ │                            │
-│          ├───────────────────────────┴──────────────────────────────┤
-│ ● ready  │  FOOTER   Ctrl/⌘ + Enter ……………………        [Copy] [Humanize] │
-└──────────┴──────────────────────────────────────────────────────────┘
-```
-
-- **Sidebar** — brand mark, `New rewrite`, then the conversation list: title (first 60 characters of the draft), relative time and rewrite count in mono. The active conversation is marked by a coral rail, not a filled pill. Status dot at the bottom shows `model ready` / `model offline`, polled every 30 seconds.
-- **Deleting** — a trash icon button appears on hover, focus, or always on touch devices. Press once to arm (`Press again to delete`, turns red, auto-disarms after 3 s), press again to confirm. Escape disarms. Nothing is lost to a stray click.
-- **Header** — conversation title on the left; on the right the live state: `contacting model… 2s` → `typesetting… 9s` → `writing… 14s` → `34.2s · ~200 tok in`. A 2 px indeterminate progress line runs under the header while a request is in flight.
-- **Draft column** — word and approximate token count in the column header. Focus is shown by an inset coral hairline around the column and a coral label, so the input area is legible without a heavy outline.
-- **Rewrite column** — a faint coral margin rule runs down the left edge, evoking a marked-up page. Text streams in token by token behind a blinking caret and is replaced wholesale by the authoritative `done` payload. The column header shows how many passes it took.
-- **Margin notes** — warnings are editorial margin notes (2 px rule + small-caps label), not generic alert boxes: coral `CONTAMINATION` when a response carries text from another draft, amber `VERIFY` for numbers that disappeared, amber `CHECK LENGTH` for an over-long response, coral `ERROR` for failures, neutral `NOTE` for resamples. A standing warning is never overwritten by another notice.
-- **Empty state** — a proofreader's caret mark, one line of guidance, and a `Try an example` button that loads a real AI-flavoured draft (with numbers in it, so the verification path is easy to see).
-- **Footer** — keyboard hint on the left; `Copy` and `Humanize` on the right, both in the same row so they align with the draft column's controls.
-
-Keyboard: `Ctrl/Cmd + Enter` humanizes from the textarea. Escape closes the drawer or disarms a pending delete.
-
-**Copy button.** Tries the Clipboard API first (secure contexts only), falls back to the legacy `execCommand("copy")` path so it also works over plain HTTP on a LAN address, and if both are blocked it selects the rewrite in place and tells you to press Ctrl/Cmd+C. The button itself flashes `Copied` or `Selected` — results warnings are never overwritten.
-
-**Responsive.** At 1280 px and above: 264 px sidebar, equal columns, 66-character measure. Below 1280 px: 224 px sidebar and the rewrite column gets the larger share (0.9 / 1.1). Below 900 px: the sidebar becomes an off-canvas drawer behind a menu button (scrim, Escape, focus moved in and trapped), the columns stack 45/55, and the action bar becomes a sticky bottom bar. Below 560 px: the keyboard hint hides and the primary button takes the full width.
-
-## Design system
-
-Defined once as CSS custom properties at the top of `web/style.css`.
-
-| Group | Tokens |
-|---|---|
-| Surfaces | `--ink-1000` page `#0b0a09`, `--ink-950` chrome `#100e0d`, `--ink-900` result `#141211`, `--ink-800` hover `#1b1917`, `--line` / `--line-soft` / `--line-strong` |
-| Text | `--text` `#f4f1ec` (16:1), `--text-muted` `#a8a29a` (7.5:1), `--text-faint` `#857f77` (4.7:1 — passes AA at small sizes) |
-| Semantics | `--accent` coral `#ff7a5c` = act, `--caution` amber `#f2b134` = verify, `--ready` sage `#7fbf9b` = good, `--danger` `#e5484d` = errors only |
-| Type | `--font-sans` system UI for chrome, `--font-serif` (Charter/Georgia) for the draft and rewrite at 18 px/1.72, `--font-mono` for counts, timings and ids |
-| Space | 4 px base: `--s1` … `--s7` (`4 8 12 16 24 32 48`) |
-| Motion | `--t-fast` 120 ms, `--t-med` 180 ms, `--t-slow` 240 ms, `--ease` `cubic-bezier(.2,.7,.3,1)` |
-
-The only gradient is one quiet coral wash behind the top-right of the page; the only texture is a 2% paper grain. Icons are inline SVG at 1.6–1.8 stroke in `currentColor` — no icon font, no emoji, no external requests of any kind. Every interactive element has a visible `:focus-visible` ring, and all animation is disabled under `prefers-reduced-motion: reduce`.
-
-
 ## Configuration
 
 Environment variables read by `run.sh`:
