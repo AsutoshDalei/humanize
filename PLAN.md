@@ -154,3 +154,40 @@ Net: prompt processing **4.8×** faster, generation **2.1×** faster than the in
 - Clicking a conversation loads its **latest** rewrite; `＋ New` starts a fresh one.
 - The Chinese-output retry path is implemented but rarely triggers (it needs an English draft coming back ≥5% Chinese).
 
+## 8. Contamination incident (2026-10-25)
+
+**Report.** A response for an ordinary test prompt carried an unrelated block appended after a valid rewrite: the user's UI/design briefing (text written only for the coding agent — never intended for the model).
+
+**Investigation (all negative before the fix):**
+
+| Suspect | Evidence | Verdict |
+|---|---|---|
+| Instruction contaminated | `buildPrompt() = instr + draft + sep`; sha256 `cc51d66b4c593fbe` asserted at startup | clean |
+| Text present on disk anywhere | grepped the whole home dir: exists only in opencode's prompt history | not reachable |
+| Sent to the model by the agent | grepped every session tool-call payload for request bodies containing it | never sent |
+| Server mixing requests | `handleHumanize` uses per-request locals only | clean |
+| Embedded in the GGUF | binary grep for distinctive phrases: 0 hits | not present |
+| Model hallucination | text was verbatim incl. its typo | impossible |
+
+**Remaining carrier and fix.** `cache_prompt: true` let llama-server reuse KV state from earlier requests in its single slot — the only channel through which content from one request can appear inside a later one. Response: disable it, and add two layers so any recurrence is provable rather than anecdotal.
+
+**What changed**
+
+1. `CachePrompt: false` in `sampleParams()` — every request starts from empty KV; costs ~3 s of instruction re-scoring per run.
+2. `run.sh` pins `--cache-reuse 0` on llama-server (was already the default; now explicit).
+3. **Prompt ledger** — `-ledger logs/prompts.log`: every request logged with timestamp, session, byte length, sha256 and the exact prompt; every result logged with output sha256 and flags.
+4. **Contamination guard** — rolling window of 64 draft signatures (first 60 normalised chars); a response containing a *different* draft's run is flagged (`contamination`) and shown as an error margin note; identical resubmission never flags.
+5. **Overrun flag** — output > 2×draft+400 chars is flagged (`overrun`, `CHECK LENGTH` note): the signature of an appended block.
+6. Copy-button fallback no longer overwrites a standing warning note (found by the browser test, not by inspection).
+
+**Verification (obscura, `./obscura --help`, MCP + CDP)**
+
+- [x] `go test ./server` — 4/4: guard fires on foreign text, silent on same-draft, overrun thresholds, prompt contract
+- [x] `scripts/soak.py` — 3 alternating marker runs, zero cross-contamination, zero false positives, flags consistent
+- [x] `scripts/uitest.py` — **36/36** browser checks: no console errors, no external requests, full streaming run, copy feedback, two-step delete + Escape, New-reset, drawer logic, focus-visible/reduced-motion declarations, announcements
+- [x] Note-preservation test: a standing `VERIFY` warning survives a failed copy; clipboard advice appears only when nothing stands
+- [x] Screenshots reviewed at 1440×900 and 1280×720 (layout, palette, serif prose, rails, footer alignment)
+- [x] `scripts/selftest.sh` → PASS after every change
+
+**obscura engine limits found while testing (engine, not app):** `ch` units do not resolve (an inline `max-width:66ch` computes to `none`), the viewport cannot be emulated (capture size ≠ layout size), CSS gradients are not painted (a solid box at the identical position paints; the coral wash and margin rule do not), and `:focus`/`:focus-visible` rules never apply (an injected `#el:focus` test rule is ignored too). These checks therefore assert stylesheet declarations; real browsers are unaffected. The engine did catch two genuine bugs: the menu/close buttons leaking onto desktop (`.icon-btn` specificity) and the copy fallback clobbering warnings.
+

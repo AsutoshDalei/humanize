@@ -1,2 +1,23 @@
+# build output
 bin/
+
+# runtime state: llama.log, app.log, prompts.log, *.pid
 logs/
+
+# obscura test browser (installed separately; ~157 MB, never committed)
+obscura
+obscura-worker
+obscura-*.tar.gz
+obscura-*.zip
+
+# model weights (downloaded by llama.cpp / huggingface, never committed)
+*.gguf
+
+# editor / OS junk
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.idea/
+.vscode/

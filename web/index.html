@@ -3,58 +3,115 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Humanizer</title>
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#0b0a09">
+<title>Humanizer — rewrite AI text so it sounds human</title>
 <link rel="stylesheet" href="style.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M7 15l5-7 5 7' fill='none' stroke='%23ff7a5c' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
 </head>
 <body>
 
-<aside class="sidebar">
-  <div class="brand"><span class="brand-dot"></span>Humanizer</div>
+<a class="skip-link" href="#draft">Skip to the draft</a>
 
-  <button id="newBtn" class="new-btn" type="button">＋ New</button>
+<div class="app">
 
-  <div class="side-label">Conversations</div>
-  <nav id="history" class="history"></nav>
+  <!-- ============ sidebar ============ -->
+  <aside class="sidebar" id="sidebar" aria-label="Conversations">
 
-  <footer class="side-foot">
-    <span id="status" class="status checking">connecting…</span>
-    <span class="local">local · llama.cpp</span>
-  </footer>
-</aside>
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M7 14.5 12 7l5 7.5"/>
+          <path d="M5 18.5h14" opacity=".45"/>
+        </svg>
+      </span>
+      <span class="brand-name">Humanizer</span>
+      <button class="icon-btn brand-close" id="drawerClose" type="button" aria-label="Close sidebar">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
 
-<main class="main">
+    <button class="btn btn-new" id="newBtn" type="button">
+      <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+      New rewrite
+    </button>
 
-  <section class="panel">
-    <header class="panel-head">
-      <h2>Draft</h2>
-      <span id="draftStats" class="stats"></span>
+    <p class="side-label" id="convosLabel">Conversations</p>
+    <nav class="history" id="history" aria-labelledby="convosLabel">
+      <ul class="history-list" id="historyList"></ul>
+    </nav>
+
+    <footer class="side-foot">
+      <span class="status" id="status">
+        <span class="dot" aria-hidden="true"></span>
+        <span id="statusText">connecting…</span>
+      </span>
+      <span class="side-meta">llama.cpp · humanizer 12b · 2-bit</span>
+    </footer>
+  </aside>
+
+  <div class="scrim" id="scrim" hidden></div>
+
+  <!-- ============ workspace ============ -->
+  <div class="workspace">
+
+    <header class="topbar">
+      <button class="icon-btn menu-btn" id="menuBtn" type="button"
+              aria-label="Open conversations" aria-controls="sidebar" aria-expanded="false">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+      </button>
+
+      <h1 class="convo-title" id="convoTitle">New rewrite</h1>
+
+      <span class="run-meta" id="runMeta"></span>
+
+      <div class="progress" id="progress" aria-hidden="true" hidden><span></span></div>
     </header>
 
-    <textarea id="draft" spellcheck="false"
-      placeholder="Paste the AI-written text you want to sound human…"></textarea>
+    <main class="columns" id="columns">
 
-    <div class="panel-foot">
-      <span id="hint" class="hint">⌘/Ctrl + Enter</span>
-      <button id="humanizeBtn" class="primary" type="button">Humanize</button>
-    </div>
-  </section>
+      <!-- draft -->
+      <section class="col col--draft" aria-labelledby="draftLabel">
+        <div class="col-head">
+          <span class="col-label" id="draftLabel">Draft</span>
+          <span class="col-meta" id="draftMeta"></span>
+        </div>
+        <div class="col-body">
+          <textarea id="draft" spellcheck="true" aria-labelledby="draftLabel"
+            placeholder="Paste the AI-written text you want to sound human…"></textarea>
+        </div>
+      </section>
 
-  <section class="panel">
-    <header class="panel-head">
-      <h2>Rewritten</h2>
-      <button id="copyBtn" class="ghost" type="button" hidden>Copy</button>
-    </header>
+      <!-- rewrite -->
+      <section class="col col--out" aria-labelledby="outLabel">
+        <div class="col-head">
+          <span class="col-label" id="outLabel">Rewritten</span>
+          <span class="col-meta" id="outMeta"></span>
+        </div>
+        <div class="col-body">
+          <div class="note-slot"><div id="notice" class="note" role="status" aria-live="polite" hidden></div></div>
+          <div id="result" class="result"></div>
+        </div>
+      </section>
 
-    <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
+    </main>
 
-    <div id="result" class="result"><p class="placeholder">The rewrite streams in here as the model writes it.</p></div>
+    <footer class="actionbar">
+      <span class="hint" id="hint">Ctrl / &#8984; + Enter</span>
+      <div class="actions">
+        <button class="btn btn-ghost" id="copyBtn" type="button" hidden>
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="9" y="9" width="12" height="12" rx="2"/>
+            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+          </svg>
+          <span class="btn-label">Copy</span>
+        </button>
+        <button class="btn btn-primary" id="humanizeBtn" type="button">Humanize</button>
+      </div>
+    </footer>
 
-    <div class="panel-foot">
-      <span id="timing" class="stats"></span>
-    </div>
-  </section>
-
-</main>
+  </div>
+</div>
 
 <script src="app.js"></script>
 </body>

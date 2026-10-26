@@ -96,7 +96,15 @@ func sampleParams(prompt string, nPredict int) completionReq {
 		RepeatPenalty: 1.0, // off
 		NPredict:      nPredict,
 		Stream:        true,
-		CachePrompt:   true, // retries re-send the identical prompt
+		// Prompt caching is deliberately OFF (was: true).
+		// cache_prompt lets llama-server reuse KV state from earlier requests in
+		// its single slot (-np 1), which is the one channel through which content
+		// from an unrelated request can surface inside a later response — on
+		// 2026-10-24 a response carried an unrelated block appended after a valid
+		// rewrite. Disabling it costs re-scoring the ~95-token instruction per run
+		// (~3 s); every request now starts from provably empty state. Every prompt
+		// is recorded in the ledger (see -ledger) so anomalies stay traceable.
+		CachePrompt: false,
 	}
 }
 
@@ -189,6 +197,118 @@ func streamCompletion(ctx context.Context, prompt string, nPredict int, onToken 
 	return sb.String(), nil
 }
 
+// --- prompt ledger ---------------------------------------------------------
+//
+// Every request appends the exact prompt it sent to an append-only ledger, so
+// when a response looks wrong the first question — "what was actually in the
+// prompt?" — is answerable from disk. Best-effort: ledger failures never fail
+// a request.
+
+var (
+	ledgerPath string
+	ledgerMu   sync.Mutex
+)
+
+// ledgerLine writes: <time> <kind> key=value key="quoted text" ...
+func ledgerLine(kind string, kv ...string) {
+	if ledgerPath == "" {
+		return
+	}
+	var b strings.Builder
+	b.WriteString(time.Now().UTC().Format("2006-01-02T15:04:05.000Z"))
+	b.WriteByte(' ')
+	b.WriteString(kind)
+	for i := 0; i+1 < len(kv); i += 2 {
+		b.WriteByte(' ')
+		b.WriteString(kv[i])
+		b.WriteByte('=')
+		v := kv[i+1]
+		if strings.ContainsAny(v, " \t\"\n") {
+			v = strconv.Quote(v)
+		}
+		b.WriteString(v)
+	}
+	b.WriteByte('\n')
+
+	ledgerMu.Lock()
+	defer ledgerMu.Unlock()
+	f, err := os.OpenFile(ledgerPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	_, _ = f.WriteString(b.String())
+}
+
+// --- contamination guard ---------------------------------------------------
+//
+// A "foreign head" is a verbatim run in the output that came from a *different*
+// draft — text that could not have been derived from what the user submitted.
+// It is reported to the user, never edited out of the response.
+
+type draftSig struct {
+	session string
+	head    string // first 60 characters, lowercased, whitespace collapsed
+}
+
+var (
+	sigMu  sync.Mutex
+	recent = make([]draftSig, 0, 64)
+)
+
+func normHead(s string) string {
+	n := strings.ToLower(strings.Join(strings.Fields(s), " "))
+	if r := []rune(n); len(r) > 60 {
+		n = string(r[:60])
+	}
+	return n
+}
+
+// rememberDraft records a signature at request start, so a concurrent or
+// earlier request's draft can be recognised inside this response.
+func rememberDraft(session, draft string) {
+	h := normHead(draft)
+	if len([]rune(h)) < 40 { // too short to be a meaningful signature
+		return
+	}
+	sigMu.Lock()
+	defer sigMu.Unlock()
+	for _, s := range recent {
+		if s.head == h && s.session == session {
+			return
+		}
+	}
+	recent = append(recent, draftSig{session: session, head: h})
+	if len(recent) > 64 {
+		recent = recent[len(recent)-64:]
+	}
+}
+
+// foreignHead returns another draft's signature found verbatim in out.
+func foreignHead(currentDraft, out string) string {
+	cur := normHead(currentDraft)
+	n := strings.ToLower(strings.Join(strings.Fields(out), " "))
+	sigMu.Lock()
+	defer sigMu.Unlock()
+	for i := len(recent) - 1; i >= 0; i-- {
+		if recent[i].head == cur {
+			continue // the same draft resubmitted — not foreign
+		}
+		if strings.Contains(n, recent[i].head) {
+			return recent[i].head
+		}
+	}
+	return ""
+}
+
+// overrun flags output that grew far beyond the draft it came from — the
+// signature of a block appended to an otherwise normal rewrite.
+func overrun(draft, out string) bool {
+	d := len([]rune(strings.TrimSpace(draft)))
+	o := len([]rune(out))
+	return d > 0 && o > 2*d+400
+}
+
 // --- output checks ---------------------------------------------------------
 
 var (
@@ -271,6 +391,8 @@ type Message struct {
 	MissingNumbers []string  `json:"missingNumbers"`
 	Retries        int       `json:"retries"`
 	MS             int64     `json:"ms"`
+	Contamination  string    `json:"contamination,omitempty"`
+	Overrun        bool      `json:"overrun,omitempty"`
 	CreatedAt      time.Time `json:"createdAt"`
 }
 
@@ -417,8 +539,10 @@ func main() {
 	addr := flag.String("addr", ":8090", "address for the web server")
 	llamaURLFlag := flag.String("llama", "http://127.0.0.1:8080", "llama-server base URL")
 	webDir := flag.String("web", "web", "directory with the static UI")
+	ledger := flag.String("ledger", "", "append-only file receiving every prompt sent to the model")
 	flag.Parse()
 	llamaURL = *llamaURLFlag
+	ledgerPath = *ledger
 
 	if err := verifyPrompt(); err != nil {
 		log.Fatalf("startup: %v", err)
@@ -513,6 +637,9 @@ func handleHumanize(w http.ResponseWriter, r *http.Request, st *store) {
 	}
 
 	sess, _ := st.getOrCreate(req.SessionID)
+	rememberDraft(sess.ID, req.Draft)
+	ledgerLine("request", "session", sess.ID, "bytes", strconv.Itoa(len(prompt)),
+		"sha256", fmt.Sprintf("%x", sha256.Sum256([]byte(prompt))), "prompt", prompt)
 	out, err := newSSE(w)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
@@ -554,8 +681,19 @@ func handleHumanize(w http.ResponseWriter, r *http.Request, st *store) {
 	}
 	text = strings.TrimSpace(text)
 	if why := promptEchoed(text); why != "" {
+		ledgerLine("rejected", "session", sess.ID, "why", why)
 		out.send("error", map[string]any{"message": "bad model output (" + why + ")"})
 		return
+	}
+
+	// Contamination checks: report, never silently edit the model's output.
+	contam := foreignHead(req.Draft, text)
+	over := overrun(req.Draft, text)
+	if contam != "" {
+		log.Printf("session %s: CONTAMINATION — response contains a run from another draft: %q", sess.ID, contam)
+	}
+	if over {
+		log.Printf("session %s: overrun — %d runes out for %d runes in", sess.ID, len(text), len(req.Draft))
 	}
 
 	msg := Message{
@@ -565,9 +703,21 @@ func handleHumanize(w http.ResponseWriter, r *http.Request, st *store) {
 		MissingNumbers: missingNumbers(req.Draft, text),
 		Retries:        retries,
 		MS:             time.Since(started).Milliseconds(),
+		Contamination:  contam,
+		Overrun:        over,
 		CreatedAt:      time.Now().UTC(),
 	}
 	st.appendMessage(sess.ID, msg)
+
+	contamField := "none"
+	if contam != "" {
+		contamField = contam
+	}
+	ledgerLine("result", "session", sess.ID, "ms", strconv.FormatInt(msg.MS, 10),
+		"out_sha256", fmt.Sprintf("%x", sha256.Sum256([]byte(text))),
+		"out_bytes", strconv.Itoa(len(text)),
+		"contam", contamField,
+		"overrun", strconv.FormatBool(over))
 
 	out.send("done", map[string]any{
 		"sessionId":      sess.ID,
@@ -578,6 +728,8 @@ func handleHumanize(w http.ResponseWriter, r *http.Request, st *store) {
 		"ms":             msg.MS,
 		"draftTokens":    draftTokens,
 		"text":           text,
+		"contamination":  contam,
+		"overrun":        over,
 	})
 }
 

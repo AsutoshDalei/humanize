@@ -57,15 +57,19 @@ Logs and pid files live in `logs/`. The compiled binary goes to `bin/`.
 ├── run.sh                launcher: llama.cpp + web server, with pid files and cleanup
 ├── go.mod                module "humanize", no dependencies
 ├── server/
-│   └── main.go           the whole backend (one file, Go standard library)
+│   ├── main.go           the whole backend (one file, Go standard library)
+│   └── main_test.go      unit tests: prompt contract, contamination guard
 ├── web/
 │   ├── index.html        page structure
 │   ├── style.css         dark theme
 │   └── app.js            streaming, sessions, copy button (vanilla JS)
 ├── scripts/
-│   └── selftest.sh       end-to-end test against the model's own checklist
+│   ├── selftest.sh       end-to-end test against the model's own checklist
+│   ├── soak.py           contamination soak: alternating marker drafts
+│   └── uitest.py         browser test suite driven through obscura's MCP
+├── obscura               headless browser used for all UI testing
 ├── bin/                  build output (git-ignored)
-└── logs/                 llama.log, app.log, pid files (git-ignored)
+└── logs/                 llama.log, app.log, prompts.log, pid files (git-ignored)
 ```
 
 ## How it works
@@ -122,10 +126,13 @@ At startup the server hashes this prompt with the draft `"X"` and refuses to run
 
 ```json
 {"temperature": 1.0, "top_p": 0.95, "top_k": 0, "min_p": 0,
- "repeat_penalty": 1.0, "n_predict": "<clamped>", "stream": true}
+ "repeat_penalty": 1.0, "n_predict": "<clamped>", "stream": true,
+ "cache_prompt": false}
 ```
 
 No `stop` string is ever sent; generation ends at EOS.
+
+`cache_prompt` is deliberately `false`. When it is `true`, llama-server reuses KV state from earlier requests in its single slot (`-np 1`), which is the one channel through which content from an unrelated request can surface inside a later response. Disabling it costs a re-score of the ~95-token instruction per run (about 3 s) and guarantees every request starts from empty state. `run.sh` additionally pins `--cache-reuse 0` on llama-server.
 
 **Budget** — `n_predict = clamp(2.5 x draftTokens, 256, 2048)`, the rule the model's own app uses. Token counts come from llama-server's `/tokenize`, so they are exact rather than estimated. Drafts over 7400 tokens are rejected with a message telling you to split the text, because the context is 8192 tokens.
 
@@ -134,6 +141,19 @@ No `stop` string is ever sent; generation ends at EOS.
 1. *Language* — if an English draft comes back with a Chinese-heavy rewrite (10+ Han characters, more than 5% of the output), the server resamples with identical settings, up to 3 attempts. The UI shows a notice when this happens.
 2. *Wiring* — if the output echoes the instruction, contains `### Rewritten`, or shows chat markers like `<start_of_turn>`, the request fails with an error instead of returning garbage.
 3. *Facts* — every digit sequence in the draft is looked up in the rewrite. Any that vanished are returned in `missingNumbers` and shown as a warning strip. Nothing is edited silently; the model's text is passed through as-is.
+4. *Contamination* — the first 60 normalised characters of every draft are remembered (a rolling window of 64). If a response contains a verbatim run belonging to a **different** draft, the response is flagged with `contamination` and the UI shows an error margin note. The same draft resubmitted never triggers it.
+5. *Overrun* — a response longer than twice the draft plus 400 characters is flagged with `overrun`: the signature of a block appended after a normal rewrite. Reported as a `CHECK LENGTH` note; the text is never trimmed.
+
+### Prompt ledger
+
+Every request appends the exact prompt it sent to `logs/prompts.log` (enabled by the `-ledger` flag that `run.sh` passes), one line per request plus one line per result:
+
+```
+2026-10-25T23:35:38.201Z request session=9d83c3ea52cec323 bytes=1325 sha256=b34cbeaf… prompt="Rewrite the text below …"
+2026-10-25T23:36:14.284Z result session=9d83c3ea52cec323 ms=36082 out_sha256=9c621f76… out_bytes=965 contam=none overrun=false
+```
+
+When a response ever looks wrong, the first question — what was actually in the prompt? — is answerable from disk. The ledger is the backstop that makes contamination attributable instead of mysterious.
 
 ## API
 
@@ -160,7 +180,7 @@ Returns `text/event-stream`. Events:
 | `meta` | `{sessionId, attempt, draftTokens}` | session assigned, stream starting |
 | `token` | `{t}` | one generated chunk, append it |
 | `retry` | `{attempt}` | previous attempt discarded, clear the panel |
-| `done` | `{sessionId, messageId, attempts, retries, missingNumbers, ms, draftTokens, text}` | final result; `text` is authoritative |
+| `done` | `{sessionId, messageId, attempts, retries, missingNumbers, ms, draftTokens, text, contamination, overrun}` | final result; `text` is authoritative |
 | `error` | `{message}` | something went wrong |
 
 Example:
@@ -187,6 +207,8 @@ Newest first.
                "missingNumbers": [], "retries": 0, "ms": 14200, "createdAt": "…"}]}
 ```
 
+Messages may also carry `contamination` (string) and `overrun` (bool) when a response was flagged, so reopening a conversation shows the same warnings it showed live.
+
 ### `DELETE /api/sessions/{id}`
 
 ```json
@@ -197,13 +219,52 @@ Newest first.
 
 ## The page
 
-- **Sidebar** — New button, then the conversation list: title (first 60 characters of the draft), relative time, rewrite count. Hover an item for the delete control. A status dot at the bottom shows whether the model is ready; it is polled every 30 seconds.
-- **Left panel** — the draft. A counter shows word and approximate token counts. The Humanize button disables while the model is working.
-- **Right panel** — the rewrite, appearing token by token with a blinking caret, then finalized when `done` arrives. A Copy button appears with the result, plus a footer line with elapsed time, prompt tokens, and attempt count. Warnings (missing numbers, resamples, errors) show in a strip above the text.
+**Layout.** A shared 56 px header and a shared 64 px footer span both columns, so the draft and the rewrite always start and end at exactly the same height — the two columns cannot drift apart. The middle is a two-column grid split at the centre hairline.
 
-Keyboard: `Ctrl/Cmd + Enter` humanizes from the textarea.
+```
+┌──────────┬──────────────────────────────────────────────────────────┐
+│ brand    │  HEADER   conversation title …………… live run status · 2px progress │
+│          ├───────────────────────────┬──────────────────────────────┤
+│ + New    │  DRAFT            142 words│  REWRITTEN          1 pass  │
+│          │                           │ │ margin rule                 │
+│ CONVOS   │  serif, editable, 66ch     │ │ serif, read-only, 66ch      │
+│  · item  │                           │ │ (margin note when needed)   │
+│  · item  │                           │ │                            │
+│          ├───────────────────────────┴──────────────────────────────┤
+│ ● ready  │  FOOTER   Ctrl/⌘ + Enter ……………………        [Copy] [Humanize] │
+└──────────┴──────────────────────────────────────────────────────────┘
+```
 
-Layout is a CSS grid: 240 px sidebar plus two equal panels, collapsing to stacked panels under 900 px width.
+- **Sidebar** — brand mark, `New rewrite`, then the conversation list: title (first 60 characters of the draft), relative time and rewrite count in mono. The active conversation is marked by a coral rail, not a filled pill. Status dot at the bottom shows `model ready` / `model offline`, polled every 30 seconds.
+- **Deleting** — a trash icon button appears on hover, focus, or always on touch devices. Press once to arm (`Press again to delete`, turns red, auto-disarms after 3 s), press again to confirm. Escape disarms. Nothing is lost to a stray click.
+- **Header** — conversation title on the left; on the right the live state: `contacting model… 2s` → `typesetting… 9s` → `writing… 14s` → `34.2s · ~200 tok in`. A 2 px indeterminate progress line runs under the header while a request is in flight.
+- **Draft column** — word and approximate token count in the column header. Focus is shown by an inset coral hairline around the column and a coral label, so the input area is legible without a heavy outline.
+- **Rewrite column** — a faint coral margin rule runs down the left edge, evoking a marked-up page. Text streams in token by token behind a blinking caret and is replaced wholesale by the authoritative `done` payload. The column header shows how many passes it took.
+- **Margin notes** — warnings are editorial margin notes (2 px rule + small-caps label), not generic alert boxes: coral `CONTAMINATION` when a response carries text from another draft, amber `VERIFY` for numbers that disappeared, amber `CHECK LENGTH` for an over-long response, coral `ERROR` for failures, neutral `NOTE` for resamples. A standing warning is never overwritten by another notice.
+- **Empty state** — a proofreader's caret mark, one line of guidance, and a `Try an example` button that loads a real AI-flavoured draft (with numbers in it, so the verification path is easy to see).
+- **Footer** — keyboard hint on the left; `Copy` and `Humanize` on the right, both in the same row so they align with the draft column's controls.
+
+Keyboard: `Ctrl/Cmd + Enter` humanizes from the textarea. Escape closes the drawer or disarms a pending delete.
+
+**Copy button.** Tries the Clipboard API first (secure contexts only), falls back to the legacy `execCommand("copy")` path so it also works over plain HTTP on a LAN address, and if both are blocked it selects the rewrite in place and tells you to press Ctrl/Cmd+C. The button itself flashes `Copied` or `Selected` — results warnings are never overwritten.
+
+**Responsive.** At 1280 px and above: 264 px sidebar, equal columns, 66-character measure. Below 1280 px: 224 px sidebar and the rewrite column gets the larger share (0.9 / 1.1). Below 900 px: the sidebar becomes an off-canvas drawer behind a menu button (scrim, Escape, focus moved in and trapped), the columns stack 45/55, and the action bar becomes a sticky bottom bar. Below 560 px: the keyboard hint hides and the primary button takes the full width.
+
+## Design system
+
+Defined once as CSS custom properties at the top of `web/style.css`.
+
+| Group | Tokens |
+|---|---|
+| Surfaces | `--ink-1000` page `#0b0a09`, `--ink-950` chrome `#100e0d`, `--ink-900` result `#141211`, `--ink-800` hover `#1b1917`, `--line` / `--line-soft` / `--line-strong` |
+| Text | `--text` `#f4f1ec` (16:1), `--text-muted` `#a8a29a` (7.5:1), `--text-faint` `#857f77` (4.7:1 — passes AA at small sizes) |
+| Semantics | `--accent` coral `#ff7a5c` = act, `--caution` amber `#f2b134` = verify, `--ready` sage `#7fbf9b` = good, `--danger` `#e5484d` = errors only |
+| Type | `--font-sans` system UI for chrome, `--font-serif` (Charter/Georgia) for the draft and rewrite at 18 px/1.72, `--font-mono` for counts, timings and ids |
+| Space | 4 px base: `--s1` … `--s7` (`4 8 12 16 24 32 48`) |
+| Motion | `--t-fast` 120 ms, `--t-med` 180 ms, `--t-slow` 240 ms, `--ease` `cubic-bezier(.2,.7,.3,1)` |
+
+The only gradient is one quiet coral wash behind the top-right of the page; the only texture is a 2% paper grain. Icons are inline SVG at 1.6–1.8 stroke in `currentColor` — no icon font, no emoji, no external requests of any kind. Every interactive element has a visible `:focus-visible` ring, and all animation is disabled under `prefers-reduced-motion: reduce`.
+
 
 ## Configuration
 
@@ -248,7 +309,10 @@ In practice a 150-word paragraph takes roughly 20 to 40 seconds. Streaming exist
 
 ```bash
 ./run.sh                    # must be running
-./scripts/selftest.sh
+./scripts/selftest.sh       # end-to-end against the model's own checklist
+go test ./server            # prompt contract + contamination guard unit tests
+python3 scripts/soak.py     # contamination soak (3 marker runs, ~1 min)
+python3 scripts/uitest.py   # browser suite via obscura (see below)
 ```
 
 The self-test is a port of section 8 of the model's `AGENTS.md`. It checks the health endpoints, confirms the prompt-hash log line, sends a real draft from the model's evaluation set through the streaming API, and then validates the result:
@@ -262,6 +326,17 @@ The self-test is a port of section 8 of the model's `AGENTS.md`. It checks the h
 
 Expected final line: `PASS: install looks right`.
 
+**Contamination soak** (`scripts/soak.py`) runs three drafts with distinctive marker terms back to back and fails if any response contains another run's markers, if an overrun goes unflagged, or if the guard ever fires on a clean run.
+
+**Browser suite** (`scripts/uitest.py`) drives the real UI through obscura's MCP server: it loads the page, asserts zero external requests and zero console errors, checks the focus-visible and reduced-motion rules, runs a full streaming rewrite, exercises the copy button, the two-step delete, Escape, the New-reset, and the drawer logic. It expects obscura's MCP endpoint:
+
+```bash
+./obscura mcp --http --port 8399 --allow-private-network &
+python3 scripts/uitest.py
+```
+
+Known limits of the test engine (all verified, none are app bugs): obscura cannot resolve `ch` units or change the viewport, does not paint CSS gradients, and does not apply `:focus`/`:focus-visible` — so measure, gradient and focus checks assert the stylesheet declarations instead of computed styles. Screenshots from `./obscura fetch … -s file.png` are faithful for layout, colour and typography.
+
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
@@ -271,6 +346,7 @@ Expected final line: `PASS: install looks right`.
 | `model not found` | `MODEL` points somewhere wrong | export the correct `MODEL` path |
 | Sidebar says "model offline" | llama.cpp died | `./run.sh status`, check `logs/llama.log` |
 | Very slow, GPU idle | no layers on the GPU | check `NGL` and `logs/llama.log` |
+| Rewrite contains unrelated text | cross-request context bleed (now disabled) or a bad run | check `logs/prompts.log` for the exact prompt; the UI flags it as CONTAMINATION |
 | Rewrite in Chinese for English text | a known model quirk | the server retries automatically; re-run if it persists |
 | Numbers changed | a known weakness of the 2-bit file | the warning strip lists them; proofread before sending |
 | History vanished | the store is in-memory by design | nothing to fix |

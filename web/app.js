@@ -1,27 +1,58 @@
 /* Humanizer front end — vanilla JS, no dependencies.
-   The server streams the rewrite as SSE over a POST response body, so we
-   parse the event stream by hand (EventSource cannot POST). */
+   The server streams the rewrite as SSE over a POST response body, so the
+   event stream is parsed by hand (EventSource cannot POST). */
 
 "use strict";
 
 const $ = (id) => document.getElementById(id);
 
-const draftEl = $("draft");
-const resultEl = $("result");
-const noticeEl = $("notice");
-const timingEl = $("timing");
-const statsEl = $("draftStats");
-const hintEl = $("hint");
-const historyEl = $("history");
+const ICON = {
+  caret: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M7 14.5 12 7l5 7.5"/><path d="M5 18.5h14" opacity=".45"/></svg>',
+  trash: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 6h17M8.5 6V4.6A1.6 1.6 0 0 1 10.1 3h3.8a1.6 1.6 0 0 1 1.6 1.6V6M18.5 6l-.9 13.1a1.9 1.9 0 0 1-1.9 1.8H8.3a1.9 1.9 0 0 1-1.9-1.8L5.5 6"/></svg>',
+};
+
+/* ---------- elements ---------- */
+
+const sidebar = $("sidebar");
+const scrim = $("scrim");
+const menuBtn = $("menuBtn");
+const drawerClose = $("drawerClose");
+const newBtn = $("newBtn");
+const historyList = $("historyList");
 const statusEl = $("status");
-const humanizeBtn = $("humanizeBtn");
+const statusText = $("statusText");
+const convoTitle = $("convoTitle");
+const runMeta = $("runMeta");
+const progress = $("progress");
+const draftMeta = $("draftMeta");
+const outMeta = $("outMeta");
+const draftEl = $("draft");
+const noticeEl = $("notice");
+const resultEl = $("result");
+const hintEl = $("hint");
 const copyBtn = $("copyBtn");
+const humanizeBtn = $("humanizeBtn");
+
+// polite announcements that must not disturb the visible layout
+const srLive = document.createElement("div");
+srLive.className = "sr-only";
+srLive.setAttribute("aria-live", "polite");
+document.body.appendChild(srLive);
 
 let currentSessionId = null;
 let lastResult = "";
 let busy = false;
 
-/* ---------- helpers ---------- */
+const EXAMPLE_DRAFT =
+  "Artificial intelligence has revolutionized the way modern organizations approach " +
+  "decision-making, leveraging cutting-edge algorithms to optimize processes and enhance " +
+  "operational efficiency across the globe. In today's rapidly evolving marketplace, " +
+  "businesses that fail to adopt these transformative technologies risk losing their " +
+  "competitive advantage. Our Q3 report demonstrates a 42% improvement in throughput since " +
+  "implementation, and the data clearly shows that these innovative solutions are " +
+  "instrumental in driving sustainable growth moving forward.";
+
+/* ---------- small helpers ---------- */
 
 function esc(s) {
   return String(s).replace(/[&<>"']/g, (c) => (
@@ -29,42 +60,67 @@ function esc(s) {
   ));
 }
 
-// Plain text only — safe for anything the server or model sends.
-function showNotice(text, kind) {
-  noticeEl.className = "notice" + (kind ? " " + kind : "");
-  noticeEl.textContent = text;
+function showNoteText(kind, label, text) {
+  noticeEl.className = "note note--" + kind;
+  noticeEl.innerHTML =
+    '<span class="note-label"></span><p class="note-text"></p>';
+  noticeEl.querySelector(".note-label").textContent = label;
+  noticeEl.querySelector(".note-text").textContent = text;
   noticeEl.hidden = false;
 }
 
-// For the few notices we build ourselves (numbers list).
-function showNoticeHTML(html, kind) {
-  noticeEl.className = "notice" + (kind ? " " + kind : "");
-  noticeEl.innerHTML = html;
+function showNoteHTML(kind, label, html) {
+  noticeEl.className = "note note--" + kind;
+  noticeEl.innerHTML =
+    '<span class="note-label"></span><p class="note-text"></p>';
+  noticeEl.querySelector(".note-label").textContent = label;
+  noticeEl.querySelector(".note-text").innerHTML = html;
   noticeEl.hidden = false;
 }
 
-function hideNotice() { noticeEl.hidden = true; }
+function hideNote() { noticeEl.hidden = true; }
 
-function clearResult(placeholder) {
-  resultEl.innerHTML = "";
-  if (placeholder) {
-    const p = document.createElement("p");
-    p.className = "placeholder";
-    p.textContent = placeholder;
-    resultEl.appendChild(p);
-  }
+function announce(text) { srLive.textContent = text; }
+
+function titleFor(draft) {
+  const t = String(draft).replace(/\s+/g, " ").trim();
+  const r = [...t];
+  return r.length > 60 ? r.slice(0, 60).join("") + "…" : t;
+}
+
+/* ---------- result panel ---------- */
+
+function renderEmptyOutput() {
+  resultEl.innerHTML =
+    '<div class="empty">' +
+      '<span class="empty-mark">' + ICON.caret + "</span>" +
+      '<p class="empty-title">Nothing rewritten yet</p>' +
+      '<p class="empty-text">Press Humanize and the rewrite streams into this panel, sentence by sentence.</p>' +
+      '<button class="btn btn-ghost btn-sm" id="exampleBtn" type="button">Try an example</button>' +
+    "</div>";
+  const b = $("exampleBtn");
+  if (b) b.addEventListener("click", insertExample);
+}
+
+function clearOutput() { resultEl.innerHTML = ""; lastResult = ""; }
+
+function insertExample() {
+  if (busy) return;
+  draftEl.value = EXAMPLE_DRAFT;
+  updateDraftStats();
+  hideNote();
+  draftEl.focus();
+  draftEl.setSelectionRange(0, 0);
+  draftEl.scrollTop = 0;
 }
 
 function setResult(text) {
   resultEl.textContent = text;
   lastResult = text;
   copyBtn.hidden = !text;
-  resultEl.scrollTop = resultEl.scrollHeight;
 }
 
 function appendToken(t) {
-  const ph = resultEl.querySelector(".placeholder");
-  if (ph) ph.remove();
   resultEl.appendChild(document.createTextNode(t));
   const caret = ensureCaret();
   resultEl.appendChild(caret);
@@ -85,8 +141,73 @@ function removeCaret() {
   if (c) c.remove();
 }
 
+/* ---------- run state (top bar) ---------- */
+
+let runTimer = null;
+let runStart = 0;
+let sawToken = false;
+
+function beginRun() {
+  runStart = Date.now();
+  sawToken = false;
+  runMeta.classList.add("is-live");
+  runMeta.textContent = "contacting model…";
+  progress.hidden = false;
+  clearInterval(runTimer);
+  runTimer = setInterval(() => {
+    const secs = ((Date.now() - runStart) / 1000).toFixed(0);
+    runMeta.textContent = (sawToken ? "writing…" : "typesetting…") + " " + secs + "s";
+  }, 400);
+}
+
+function endRun(label) {
+  clearInterval(runTimer);
+  runTimer = null;
+  progress.hidden = true;
+  runMeta.classList.remove("is-live");
+  runMeta.textContent = label || "";
+}
+
+/* ---------- notices for a finished pair ---------- */
+
+function showPairNotice(m) {
+  if (m.contamination) {
+    showNoteHTML(
+      "error",
+      "Contamination",
+      "This response contains a verbatim run from a different draft — " +
+        "<code>" + esc(String(m.contamination).slice(0, 90)) + "</code>. " +
+        "It was not derived from your text, so re-run the rewrite. " +
+        "The exact request is recorded in <code>logs/prompts.log</code>."
+    );
+    return;
+  }
+  if (m.missingNumbers && m.missingNumbers.length) {
+    const nums = m.missingNumbers.map((n) => "<code>" + esc(n) + "</code>").join(", ");
+    const retry = m.retries
+      ? "<br>" + m.retries + " resample" + (m.retries > 1 ? "s" : "") + " (language check)."
+      : "";
+    showNoteHTML(
+      "caution",
+      "Verify",
+      "These numbers are in your draft but not in the rewrite — " + nums + "." + retry
+    );
+  } else if (m.overrun) {
+    showNoteText(
+      "caution",
+      "Check length",
+      "The response came back much longer than your draft — part of it may be unrelated text. Compare it against your draft before using it."
+    );
+  } else if (m.retries) {
+    showNoteText("info", "Note", "Resampled " + m.retries + "× — the first attempt came back in the wrong language.");
+  } else {
+    hideNote();
+  }
+}
+
+/* ---------- timestamps ---------- */
+
 function relTime(iso) {
-  // Go marshals RFC3339Nano (up to 9 fraction digits); JS wants 3.
   const norm = String(iso).replace(/(\.\d{3})\d+/, "$1");
   const t = Date.parse(norm);
   if (isNaN(t)) return "";
@@ -105,55 +226,92 @@ async function loadSessions() {
     const r = await fetch("/api/sessions");
     const d = await r.json();
     renderSessions(d.sessions || []);
+    if (currentSessionId) {
+      const cur = (d.sessions || []).find((s) => s.id === currentSessionId);
+      if (cur) convoTitle.textContent = cur.title;
+    }
   } catch (e) {
-    historyEl.innerHTML = '<p class="empty">Cannot reach the server.</p>';
+    historyList.innerHTML =
+      '<li class="history-empty">Cannot reach the server. Try ./run.sh status.</li>';
   }
 }
 
 function renderSessions(list) {
-  historyEl.innerHTML = "";
+  disarmDelete();
+  historyList.innerHTML = "";
+
   if (!list.length) {
-    const p = document.createElement("p");
-    p.className = "empty";
-    p.textContent = "No conversations yet.";
-    historyEl.appendChild(p);
+    historyList.innerHTML =
+      '<li class="history-empty"><span class="mark">' + ICON.caret + "</span>" +
+      "No rewrites yet. Paste a draft and press Humanize — every run is saved here.</li>";
     return;
   }
+
   for (const s of list) {
-    const item = document.createElement("button");
-    item.type = "button";
-    item.className = "item" + (s.id === currentSessionId ? " active" : "");
-    item.dataset.id = s.id;
+    const li = document.createElement("li");
+    li.className = "item" + (s.id === currentSessionId ? " is-active" : "");
+    li.dataset.id = s.id;
 
-    const title = document.createElement("span");
-    title.className = "title";
-    title.textContent = s.title;
+    const open = document.createElement("button");
+    open.type = "button";
+    open.className = "item-open";
+    open.innerHTML =
+      '<span class="item-title"></span><span class="item-meta"></span>';
+    open.querySelector(".item-title").textContent = s.title;
+    open.querySelector(".item-meta").textContent =
+      relTime(s.updatedAt) + " · " + s.count + (s.count === 1 ? " rewrite" : " rewrites");
+    open.addEventListener("click", () => openSession(s.id));
 
-    const meta = document.createElement("span");
-    meta.className = "meta";
-    meta.textContent = `${relTime(s.updatedAt)} · ${s.count} ${s.count === 1 ? "rewrite" : "rewrites"}`;
+    const del = document.createElement("button");
+    del.type = "button";
+    del.className = "item-del";
+    del.innerHTML = ICON.trash;
+    del.setAttribute("aria-label", "Delete conversation: " + s.title);
+    del.addEventListener("click", () => armOrDelete(s.id, li, open.querySelector(".item-meta")));
 
-    const del = document.createElement("span");
-    del.className = "del";
-    del.title = "Delete";
-    del.textContent = "×";
-    del.addEventListener("click", (ev) => {
-      ev.stopPropagation();
-      deleteSession(s.id);
-    });
-
-    item.append(title, meta, del);
-    item.addEventListener("click", () => openSession(s.id));
-    historyEl.appendChild(item);
+    li.append(open, del);
+    historyList.appendChild(li);
   }
 }
 
+/* two-step delete: the first press arms, the second one commits */
+let armedId = null;
+let armTimer = null;
+
+function armOrDelete(id, li, metaEl) {
+  if (armedId !== id) {
+    disarmDelete();
+    armedId = id;
+    li.classList.add("is-armed");
+    metaEl.dataset.orig = metaEl.textContent;
+    metaEl.textContent = "Press again to delete";
+    armTimer = setTimeout(disarmDelete, 3000);
+  } else {
+    deleteSession(id);
+  }
+}
+
+function disarmDelete() {
+  clearTimeout(armTimer);
+  armTimer = null;
+  if (!armedId) return;
+  const li = historyList.querySelector(".item.is-armed");
+  if (li) {
+    li.classList.remove("is-armed");
+    const meta = li.querySelector(".item-meta");
+    if (meta && meta.dataset.orig) meta.textContent = meta.dataset.orig;
+  }
+  armedId = null;
+}
+
 async function deleteSession(id) {
+  disarmDelete();
   await fetch("/api/sessions/" + encodeURIComponent(id), { method: "DELETE" });
   if (currentSessionId === id) {
     currentSessionId = null;
     resetPanels();
   }
+  announce("Conversation deleted");
   loadSessions();
 }
 
@@ -164,100 +322,103 @@ async function openSession(id) {
     if (!r.ok) return;
     const s = await r.json();
     currentSessionId = s.id;
+    convoTitle.textContent = s.title;
     const m = (s.messages || [])[s.messages.length - 1];
     if (m) {
       draftEl.value = m.draft;
       updateDraftStats();
-      hideNotice();
       setResult(m.result);
       showPairNotice(m);
-      timingEl.textContent =
-        `${(m.ms / 1000).toFixed(1)}s` + (m.retries ? ` · ${m.retries} retries` : "");
+      outMeta.textContent = (m.retries + 1) + (m.retries ? " passes" : " pass");
+      endRun((m.ms / 1000).toFixed(1) + "s · ~" + wordTokens(m.result) + " tok out");
     } else {
-      resetPanels();
+      clearOutput();
+      renderEmptyOutput();
+      hideNote();
+      outMeta.textContent = "";
+      endRun("");
+      copyBtn.hidden = true;
     }
     renderHistoryActive();
+    closeDrawer();
   } catch (e) { /* ignore */ }
 }
 
-function showPairNotice(m) {
-  if (m.missingNumbers && m.missingNumbers.length) {
-    const nums = m.missingNumbers.map((n) => "<code>" + esc(n) + "</code>").join(", ");
-    const retry = m.retries
-      ? `<br>${m.retries} resample${m.retries > 1 ? "s" : ""} (language check).`
-      : "";
-    showNoticeHTML("Check these numbers against your draft — " + nums + " didn't survive the rewrite." + retry);
-  } else if (m.retries) {
-    showNotice(`Resampled ${m.retries}× — first attempt came back in the wrong language.`, "info");
-  } else {
-    hideNotice();
-  }
-}
+function wordTokens(text) { return Math.round(String(text).length / 3.5); }
 
 function renderHistoryActive() {
-  for (const el of historyEl.querySelectorAll(".item")) {
-    el.classList.toggle("active", el.dataset.id === currentSessionId);
+  for (const li of historyList.querySelectorAll(".item")) {
+    li.classList.toggle("is-active", li.dataset.id === currentSessionId);
   }
 }
 
 function resetPanels() {
   draftEl.value = "";
   updateDraftStats();
-  clearResult("The rewrite streams in here as the model writes it.");
-  hideNotice();
-  timingEl.textContent = "";
+  renderEmptyOutput();
+  hideNote();
+  outMeta.textContent = "";
+  endRun("");
   copyBtn.hidden = true;
+  convoTitle.textContent = "New rewrite";
+  renderHistoryActive();
+  draftEl.focus();
 }
 
-/* ---------- health ---------- */
+/* ---------- status ---------- */
+
+function setStatus(state, text) {
+  statusEl.className = "status" + (state ? " is-" + state : "");
+  statusText.textContent = text;
+}
 
 async function checkHealth() {
   try {
     const r = await fetch("/api/health");
     const d = await r.json();
-    if (d.llama === "ok") {
-      statusEl.className = "status ok";
-      statusEl.textContent = "model ready";
-    } else {
-      statusEl.className = "status down";
-      statusEl.textContent = "model offline";
-    }
+    if (d.llama === "ok") setStatus("ok", "model ready");
+    else setStatus("down", "model offline");
   } catch (e) {
-    statusEl.className = "status down";
-    statusEl.textContent = "server offline";
+    setStatus("down", "server offline");
   }
 }
 
-/* ---------- humanize ---------- */
+/* ---------- draft stats ---------- */
 
 function updateDraftStats() {
   const v = draftEl.value;
   const words = v.trim() ? v.trim().split(/\s+/).length : 0;
-  const est = Math.round(v.length / 3.5);
-  statsEl.textContent = words ? `${words} words · ~${est} tokens` : "";
+  draftMeta.textContent = words
+    ? words + " words · ~" + Math.round(v.length / 3.5) + " tok"
+    : "";
 }
 
 function setBusy(on) {
   busy = on;
   humanizeBtn.disabled = on;
   humanizeBtn.textContent = on ? "Rewriting…" : "Humanize";
-  hintEl.textContent = on ? "model is writing" : "⌘/Ctrl + Enter";
+  hintEl.textContent = on ? "working — you can keep typing" : "Ctrl / ⌘ + Enter";
 }
+
+/* ---------- humanize ---------- */
 
 async function humanize() {
   if (busy) return;
   const draft = draftEl.value.trim();
   if (!draft) {
-    showNotice("Paste some text first.", "info");
+    showNoteText("info", "Note", "Paste some text first — the rewrite appears on the right.");
     draftEl.focus();
     return;
   }
 
-  hideNotice();
-  clearResult("");
-  timingEl.textContent = "";
+  hideNote();
+  clearOutput();
+  outMeta.textContent = "";
   lastResult = "";
+  if (!currentSessionId) convoTitle.textContent = titleFor(draft);
   setBusy(true);
+  beginRun();
+  announce("Rewriting — the model is working");
 
   let res;
   try {
@@ -267,18 +428,20 @@ async function humanize() {
       body: JSON.stringify({ draft, sessionId: currentSessionId }),
     });
   } catch (e) {
-    showNotice("Cannot reach the server: " + e.message, "error");
+    endRun("");
     setBusy(false);
-    clearResult("The rewrite streams in here as the model writes it.");
+    renderEmptyOutput();
+    showNoteText("error", "Connection", "Cannot reach the server: " + e.message);
     return;
   }
 
   if (!res.ok) {
-    let msg = "request failed (" + res.status + ")";
+    let msg = "Request failed (" + res.status + ").";
     try { msg = (await res.json()).error || msg; } catch (e) {}
-    showNotice(msg, "error");
+    endRun("failed");
     setBusy(false);
-    clearResult("The rewrite streams in here as the model writes it.");
+    renderEmptyOutput();
+    showNoteText("error", "Error", msg);
     return;
   }
 
@@ -292,6 +455,7 @@ async function readStream(body) {
   const dec = new TextDecoder();
   let buf = "";
   let failed = false;
+  let sawAnything = false;
 
   const handle = (block) => {
     let event = "message";
@@ -308,28 +472,43 @@ async function readStream(body) {
       case "meta":
         currentSessionId = d.sessionId;
         break;
+
       case "token":
+        sawToken = true;
+        sawAnything = true;
         appendToken(d.t);
         break;
+
       case "retry":
         removeCaret();
-        clearResult("");
-        showNotice(`Attempt ${d.attempt}: the first attempt came back in Chinese, resampling…`, "info");
+        clearOutput();
+        showNoteText(
+          "info", "Retrying",
+          "Attempt " + d.attempt + ": the previous attempt came back in Chinese. Resampling…"
+        );
         break;
-      case "done":
+
+      case "done": {
         removeCaret();
         setResult(d.text);
-        lastResult = d.text;
         currentSessionId = d.sessionId;
         showPairNotice(d);
-        timingEl.textContent =
-          `${(d.ms / 1000).toFixed(1)}s · ~${d.draftTokens} tok in` +
-          (d.attempts > 1 ? ` · ${d.attempts} attempts` : "");
+        outMeta.textContent =
+          d.attempts + (d.attempts === 1 ? " pass" : " passes");
+        const secs = (d.ms / 1000).toFixed(1);
+        endRun(secs + "s · ~" + d.draftTokens + " tok in");
+        announce("Rewrite finished in " + secs + " seconds" +
+          (d.missingNumbers && d.missingNumbers.length
+            ? "; " + d.missingNumbers.length + " number(s) need checking"
+            : ""));
         break;
+      }
+
       case "error":
         removeCaret();
         failed = true;
-        showNotice(d.message, "error");
+        endRun("failed");
+        showNoteText("error", "Error", d.message);
         break;
     }
   };
@@ -347,49 +526,50 @@ async function readStream(body) {
     }
     if (buf.trim()) handle(buf);
   } catch (e) {
-    showNotice("stream interrupted: " + e.message, "error");
     failed = true;
+    endRun("interrupted");
+    showNoteText("error", "Error", "Stream interrupted: " + e.message);
   }
 
   removeCaret();
-  if (!failed && !lastResult && !resultEl.textContent.trim()) {
-    clearResult("The model returned nothing — try again.");
+  if (!failed && !sawAnything) {
+    endRun("no output");
+    renderEmptyOutput();
+    showNoteText("error", "Error", "The model returned nothing — try again.");
+  } else if (!failed && !lastResult) {
+    lastResult = resultEl.textContent;
+    copyBtn.hidden = !lastResult;
   }
 }
 
-/* ---------- wiring ---------- */
-
-humanizeBtn.addEventListener("click", humanize);
-draftEl.addEventListener("input", updateDraftStats);
-draftEl.addEventListener("keydown", (e) => {
-  if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
-    e.preventDefault();
-    humanize();
-  }
-});
-
-$("newBtn").addEventListener("click", () => {
-  if (busy) return;
-  currentSessionId = null;
-  resetPanels();
-  renderHistoryActive();
-  draftEl.focus();
-});
+/* ---------- copy ---------- */
 
 copyBtn.addEventListener("click", async () => {
   if (!lastResult) return;
   const how = await copyText(lastResult);
   if (how !== "failed") {
     flashButton(copyBtn, "Copied");
+    announce("Rewrite copied to the clipboard");
   } else {
     // Last resort: select the text so Ctrl/Cmd+C always works.
     selectElement(resultEl);
-    showNotice("Your browser blocked clipboard access, so the rewrite is now selected instead — press Ctrl/Cmd + C.", "info");
     flashButton(copyBtn, "Selected");
+    announce("Clipboard blocked; the rewrite is selected instead");
+    // Never replace a standing warning (missing numbers / error) with this.
+    const standingWarning =
+      !noticeEl.hidden &&
+      (noticeEl.classList.contains("note--caution") ||
+       noticeEl.classList.contains("note--error"));
+    if (!standingWarning) {
+      showNoteText(
+        "info", "Clipboard",
+        "Your browser blocked clipboard access, so the rewrite is selected instead — press Ctrl / ⌘ + C."
+      );
+    }
   }
 });
 
-// navigator.clipboard only exists in a secure context (https or localhost);
+// navigator.clipboard exists only in a secure context (https or localhost);
 // over plain http on a LAN address it is undefined. Fall back to the legacy
 // path, then to selecting the text.
 async function copyText(text) {
@@ -397,12 +577,14 @@ async function copyText(text) {
     try {
       await navigator.clipboard.writeText(text);
       return "clipboard";
-    } catch (e) { /* permission denied or document blurred — fall through */ }
+    } catch (e) { /* denied or blurred — fall through */ }
   }
   const ta = document.createElement("textarea");
   ta.value = text;
   ta.setAttribute("readonly", "");
-  ta.style.cssText = "position:fixed;top:0;left:0;width:1px;height:1px;padding:0;border:0;outline:0;background:transparent;opacity:0;";
+  ta.style.cssText =
+    "position:fixed;top:0;left:0;width:1px;height:1px;padding:0;border:0;" +
+    "outline:0;background:transparent;opacity:0;";
   document.body.appendChild(ta);
   ta.focus();
   ta.select();
@@ -423,24 +605,90 @@ function selectElement(el) {
   } catch (e) { /* ignore */ }
 }
 
-// Temporary label swap that never fights with a longer-running flash.
 const flashes = new Map();
 function flashButton(btn, label) {
   if (flashes.has(btn)) clearTimeout(flashes.get(btn));
-  const original = btn.dataset.label || btn.textContent;
-  btn.dataset.label = original;
-  btn.textContent = label;
+  const target = btn.querySelector(".btn-label") || btn;
+  if (!btn.dataset.label) btn.dataset.label = target.textContent;
+  target.textContent = label;
   btn.classList.add("is-success");
   flashes.set(btn, setTimeout(() => {
-    btn.textContent = btn.dataset.label;
+    target.textContent = btn.dataset.label;
     btn.classList.remove("is-success");
     flashes.delete(btn);
   }, 1600));
 }
 
+/* ---------- sidebar drawer (mobile) ---------- */
+
+function isDrawer() { return window.matchMedia("(max-width: 899px)").matches; }
+
+function openDrawer() {
+  sidebar.classList.add("is-open");
+  scrim.hidden = false;
+  menuBtn.setAttribute("aria-expanded", "true");
+  const first = sidebar.querySelector("button");
+  if (first) first.focus();
+}
+
+function closeDrawer() {
+  if (!sidebar.classList.contains("is-open")) return;
+  sidebar.classList.remove("is-open");
+  scrim.hidden = true;
+  menuBtn.setAttribute("aria-expanded", "false");
+  if (isDrawer()) menuBtn.focus();
+}
+
+/* ---------- wiring ---------- */
+
+humanizeBtn.addEventListener("click", humanize);
+draftEl.addEventListener("input", updateDraftStats);
+
+draftEl.addEventListener("keydown", (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+    e.preventDefault();
+    humanize();
+  }
+});
+
+newBtn.addEventListener("click", () => {
+  if (busy) return;
+  currentSessionId = null;
+  resetPanels();
+  closeDrawer();
+});
+
+menuBtn.addEventListener("click", () => {
+  sidebar.classList.contains("is-open") ? closeDrawer() : openDrawer();
+});
+drawerClose.addEventListener("click", closeDrawer);
+scrim.addEventListener("click", closeDrawer);
+
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") {
+    if (armedId) { disarmDelete(); return; }
+    closeDrawer();
+  }
+  // keep Tab inside the drawer while it is open
+  if (e.key === "Tab" && sidebar.classList.contains("is-open") && isDrawer()) {
+    const f = sidebar.querySelectorAll("button, [href], textarea, input");
+    if (!f.length) return;
+    const first = f[0];
+    const last = f[f.length - 1];
+    if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+  }
+});
+
+window.addEventListener("resize", () => {
+  if (!isDrawer()) closeDrawer();
+});
+
 /* ---------- start ---------- */
 
+renderEmptyOutput();
 loadSessions();
 checkHealth();
 setInterval(checkHealth, 30000);
 updateDraftStats();
+setStatus("wait", "checking…");

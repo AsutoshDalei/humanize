@@ -96,6 +96,7 @@ start_llama() {
   fi
   say "starting llama-server  (ngl=$NGL ctx=$CTX port=$LLAMA_PORT)"
   nohup "$bin" -m "$MODEL" -c "$CTX" -np 1 -ngl "$NGL" \
+    --cache-reuse 0 \
     --host 127.0.0.1 --port "$LLAMA_PORT" >"$LOGS/llama.log" 2>&1 &
   echo $! >"$LLAMA_PIDFILE"
   if ! wait_http "http://127.0.0.1:$LLAMA_PORT/health" 180 "llama-server"; then
@@ -122,6 +123,7 @@ start_app() {
   fi
   nohup "$ROOT/bin/humanize" -addr ":$APP_PORT" \
     -llama "http://127.0.0.1:$LLAMA_PORT" -web "$ROOT/web" \
+    -ledger "$LOGS/prompts.log" \
     >"$LOGS/app.log" 2>&1 &
   echo $! >"$APP_PIDFILE"
   if ! wait_http "http://127.0.0.1:$APP_PORT/api/health" 30 "web server"; then
@@ -189,10 +191,11 @@ Environment variables:
   APP_PORT    web server port            (default: 8090)
 
 Files:
-  logs/llama.log   llama.cpp output
-  logs/app.log     web server output
-  logs/*.pid       process ids for stop/status
-  bin/humanize     compiled web server (rebuilt by "start" when Go is present)
+  logs/llama.log    llama.cpp output
+  logs/app.log      web server output
+  logs/prompts.log  every prompt sent to the model (request/result ledger)
+  logs/*.pid        process ids for stop/status
+  bin/humanize      compiled web server (rebuilt by "start" when Go is present)
 
 Examples:
   ./run.sh                      start with defaults
